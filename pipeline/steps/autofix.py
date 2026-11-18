@@ -34,6 +34,98 @@ import yaml  # noqa: F401
 from ..common import ERROR, parse_yolo_line  # noqa: F401
 
 
+LINE_DROP = {"BAD_FORMAT", "BAD_CLASS_ID", "BOX_ZERO", "DUP_BOX"}
+REMOVE_IMG = {"LEAK_TEST", "CORRUPT_IMAGE", "BAD_SIZE"}
+
+
+def _rec(image, line, action, before, after):
+    return {"image": image, "line": line, "action": action, "before": before, "after": after}
+
+
+def _clip(text):
+    """Cắt box về [0,1]. Trả về dòng mới, hoặc None nếu box không còn diện tích."""
+    c, x, y, w, h = parse_yolo_line(text)
+    x1, x2 = max(0.0, x - w / 2), min(1.0, x + w / 2)
+    y1, y2 = max(0.0, y - h / 2), min(1.0, y + h / 2)
+    nx, ny = round((x1 + x2) / 2, 6), round((y1 + y2) / 2, 6)
+    nw, nh = round(x2 - x1, 6), round(y2 - y1, 6)
+    if nw <= 0 or nh <= 0:                 # kiểm tra SAU khi làm tròn = đúng giá trị sẽ ghi
+        return None
+    return f"{c} {nx:.6f} {ny:.6f} {nw:.6f} {nh:.6f}"
+
 def fix(ds, issues, cfg):
-    # TODO
-    raise NotImplementedError("autofix chưa làm")
+    errs = [i for i in issues if i.severity == ERROR]      # không bao giờ động tới WARN
+    fixes = []
+
+    # 1. Xoá ảnh (làm trước, để bỏ qua issue dòng của ảnh đã xoá)
+    removed = set()
+    for i in errs:
+        if (i.code in REMOVE_IMG or i.code.startswith("DUP_IMAGE")) and i.image not in removed:
+            removed.add(i.image)
+            img = ds.image_path(i.image)
+            if img is not None and img.exists():
+                img.unlink()
+            lab = ds.label_path(i.image)
+            if lab.exists():
+                lab.unlink()
+            fixes.append(_rec(i.image, None, "remove_image", i.code, "(đã xoá ảnh + nhãn)"))
+
+    # 2. Ảnh chưa có nhãn -> chuyển người, KHÔNG tạo file
+    for i in errs:
+        if i.code == "MISSING_LABEL_FILE" and i.image not in removed:
+            fixes.append(_rec(i.image, None, "needs_label", "(không có file)", "chuyển người gán"))
+
+    # 3. Tên lớp trong data.yaml (chỉ ghi một lần)
+        # 3. Tên lớp trong data.yaml (chỉ ghi một lần)
+    bad_names = [i for i in errs if i.code == "BAD_CLASS_NAME"]
+    if bad_names:
+        d = yaml.safe_load(ds.yaml_path.read_text(encoding="utf-8")) or {}
+        old = d.get("names")
+        new = list(cfg["classes"])
+        if isinstance(old, dict):                          # giữ định dạng gốc
+            new = dict(enumerate(new))
+        if old != new or ("nc" in d and d["nc"] != len(new)):
+            d["names"] = new
+            if "nc" in d:
+                d["nc"] = len(new)
+            ds.yaml_path.write_text(
+                yaml.safe_dump(d, allow_unicode=True, sort_keys=False), encoding="utf-8"
+            )
+            fixes.append(_rec(bad_names[0].image, None, "rename_classes",
+                              str(old), str(cfg["classes"])))
+    
+    # 4. Sửa dòng: gom theo file, ghi lại MỘT lần
+    plan = defaultdict(lambda: {"drop": set(), "clip": set()})
+    for i in errs:
+        if i.line is None or i.image in removed:
+            continue
+        if i.code in LINE_DROP:
+            plan[i.image]["drop"].add(i.line)
+        elif i.code == "BOX_OUT_OF_IMAGE":
+            plan[i.image]["clip"].add(i.line)
+
+    for stem, p in sorted(plan.items()):
+        path = ds.label_path(stem)
+        if not path.exists():
+            continue
+        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()   # giữ dòng trống
+        out = []
+        for n, text in enumerate(raw, 1):                                       # n = số dòng GỐC
+            if n in p["drop"]:                                                  # xoá thắng cắt
+                fixes.append(_rec(stem, n, "drop_line", text, ""))
+                continue
+            if n in p["clip"]:
+                try:
+                    new = _clip(text)
+                except ValueError:
+                    new = None
+                if new is None:
+                    fixes.append(_rec(stem, n, "drop_line", text, ""))
+                    continue
+                fixes.append(_rec(stem, n, "clip_box", text, new))
+                out.append(new)
+                continue
+            out.append(text)
+        path.write_text("".join(l + "\n" for l in out), encoding="utf-8")
+
+    return fixes
