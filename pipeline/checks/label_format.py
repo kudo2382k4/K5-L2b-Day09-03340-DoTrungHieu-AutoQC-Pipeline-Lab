@@ -23,7 +23,63 @@ Gợi ý
 """
 from ..common import ERROR, WARN, Issue, iou_xywh, parse_yolo_line  # noqa: F401
 
+import math
+from collections import defaultdict
 
 def run(ds, cfg):
-    # TODO: duyệt từng file nhãn, từng dòng
-    raise NotImplementedError("check label_format chưa làm")
+    c = cfg["label_format"]
+    tol, min_px = c["overflow_tol"], c["min_box_px"]
+    max_frac, dup_iou = c["max_box_frac"], c["dup_box_iou"]
+    n_cls = len(ds.classes)
+    issues = []
+
+    def add(sev, code, stem, msg, line, **extra):
+        issues.append(Issue("label_format", sev, code, stem, msg, line=line, extra=extra))
+
+    for lp in ds.label_files():
+        stem = lp.stem
+        lines = ds.read_label_lines(stem)
+        if not lines:
+            continue
+        size = ds.image_size(stem)              # 1 lần / file
+        seen = defaultdict(list)                # cls -> [box] của các dòng trước
+
+        for ln, text in lines:
+            # 1. định dạng
+            try:
+                cls, x, y, w, h = parse_yolo_line(text)
+            except ValueError as e:
+                add(ERROR, "BAD_FORMAT", stem, f"dòng sai định dạng: {e}", ln)
+                continue
+            if not all(map(math.isfinite, (x, y, w, h))):
+                add(ERROR, "BAD_FORMAT", stem, "giá trị NaN/inf", ln)
+                continue
+            # 2. id lớp
+            if not 0 <= cls < n_cls:
+                add(ERROR, "BAD_CLASS_ID", stem, f"id lớp {cls} ngoài 0..{n_cls - 1}", ln)
+                continue
+            # 3. box rỗng
+            if w <= 0 or h <= 0:
+                add(ERROR, "BOX_ZERO", stem, f"box rỗng w={w} h={h}", ln)
+                continue
+            box = (x, y, w, h)
+            # 4. tràn ảnh
+            x1, x2, y1, y2 = x - w / 2, x + w / 2, y - h / 2, y + h / 2
+            over = max(-x1, x2 - 1, -y1, y2 - 1)
+            if over > tol:
+                add(ERROR, "BOX_OUT_OF_IMAGE", stem, f"box tràn ảnh {over:.4f}", ln,
+                    overflow=round(over, 6))
+            # 5. trùng (chỉ so trong cùng lớp)
+            same = seen[cls]
+            if any(iou_xywh(pb, box) > dup_iou for pb in same):
+                add(ERROR, "DUP_BOX", stem, "box trùng với một dòng trước (cùng lớp)", ln)
+            # 6. nhỏ (px)
+            if size:
+                short = min(w * size[0], h * size[1])
+                if short < min_px:
+                    add(WARN, "BOX_TINY", stem, f"cạnh ngắn {short:.1f}px < {min_px}px", ln)
+            # 7. quá to
+            if w * h > max_frac:
+                add(WARN, "BOX_HUGE", stem, f"box chiếm {w * h:.2f} ảnh", ln)
+            same.append(box)
+    return issues
