@@ -58,7 +58,29 @@ Tổng: autofix làm **35 thay đổi** (`03_fixes.csv`): 20 `drop_line`, 8 `cli
 4. **Ảnh đã duyệt vẫn còn cảnh báo.** 25 ảnh đã duyệt vẫn có cảnh báo ở v3 (nhãn người lệch với model, vd. `POSSIBLE_FALSE_POS`). Gate bỏ qua chúng, nên nếu người duyệt sai thì không còn lớp kiểm nào phía sau.
 
 ## 5. Train: raw vs clean (tùy chọn, chấm riêng)
-**Chưa chạy.** Tôi ưu tiên hoàn thành phần lõi (4 module, calibration, báo cáo) trước; train trên Colab là phần tùy chọn, sẽ làm ở buổi khác nếu còn thời gian.
+Chạy trên Colab (T4) bằng `notebooks/day09_train_compare.ipynb`, không đổi cấu hình: **yolo26n.pt, 20 epoch, imgsz 640, batch 16, seed 0 và 1**, cùng val `data/gold_val` (40 ảnh) và cùng test `data/test` (100 ảnh, nhãn người). Chỉ khác dữ liệu train. `clean` là **bản nháp Hold** `clean_v1` (`manifest_sha1` 8966d9f…, `config_sha1` 58d1755… khớp `08_summary.json`).
+
+Bảng từ `submission/results/comparison.md` (sinh bởi `scripts/summarize_results.py`):
+
+| biến thể | #ảnh train | số seed | map50 (TB ± độ lệch) | map50_95 (TB ± độ lệch) | precision (TB ± độ lệch) | recall (TB ± độ lệch) |
+|---|---|---|---|---|---|---|
+| raw | 224 | 2 | 0.726 ± 0.000 | 0.512 ± 0.004 | 0.764 ± 0.061 | 0.649 ± 0.028 |
+| clean | 202 | 2 | 0.701 ± 0.025 | 0.487 ± 0.008 | 0.759 ± 0.003 | 0.625 ± 0.019 |
+
+AP50 theo lớp (trung bình 2 seed, từ `*_seed*.json`): car 0,738 → 0,738; person 0,822 → 0,823; bus 0,695 → 0,703; **truck 0,649 → 0,538** (clean seed 0/1: 0,590 / 0,486).
+
+**Chênh lệch so với nhiễu.** mAP50 (clean − raw) = **−0,025**, bằng đúng độ lệch chuẩn giữa 2 seed của `clean` (0,025); hai seed của `clean` cách nhau 0,035 (0,718 / 0,683), lớn hơn cả chênh lệch giữa hai biến thể. Độ lệch ≈ 0 của `raw` (0,7256 / 0,7259) chỉ là trùng hợp với 2 seed, không có nghĩa `raw` ổn định hơn. mAP50-95 (−0,025) và recall (−0,024) cũng cùng cỡ nhiễu. **Kết luận: chưa kết luận được** `clean` tốt hơn hay kém hơn `raw`; với 2 seed và 100 ảnh test, khác biệt nằm trong nhiễu. Gần như toàn bộ chênh lệch đến từ **một lớp, truck**; ba lớp còn lại gần như bằng nhau.
+
+**Thí nghiệm gần như không đo được tác dụng của làm sạch.** Theo log train, val mAP50 cao nhất của **cả 4 lần chạy đều ở epoch 1** (raw 0,801 / 0,800; clean 0,791 / 0,739), sau đó giảm (epoch 20: 0,728 / 0,705 / 0,710 / 0,617). Nên `best.pt` được đem đi test thực chất là yolo26n tiền huấn luyện COCO sau 1 epoch; dữ liệu train (raw hay clean) chưa kịp ảnh hưởng. `clean` seed 1 thấp vì đã khởi đầu kém ngay epoch 1, tức nhiễu do khởi động chứ không do dữ liệu.
+
+**Giả thuyết và cách kiểm:**
+1. **Rò rỉ test thổi phồng điểm `raw`.** Pipeline phát hiện 5 ảnh `LEAK_TEST` (img_0049, img_0101, img_0167, img_0174, img_0221 trùng test_033, test_039, test_044, test_085, test_009). `raw` được train trên chính 5 ảnh test này, `clean` thì không. *Kiểm:* tính lại mAP của cả hai mô hình trên test sau khi bỏ 5 ảnh đó; nếu khoảng cách thu hẹp thì một phần lợi thế của `raw` là do rò rỉ.
+2. **AP truck rất nhiễu vì test có ít truck.** Test chỉ có 24 box truck trên 16 ảnh (so với 285 box person), nên một box đúng/sai làm AP truck dao động vài phần trăm; ngay trong `clean`, AP truck đã chênh 0,10 giữa 2 seed. *Kiểm:* chạy 5 seed và báo khoảng tin cậy riêng cho truck, hoặc dùng test lớn hơn.
+3. **Nhãn car/truck/bus trong `clean` bị đổi.** Dựng lại 2 bộ train bằng `scripts/materialize_dataset.py`: `clean` có **truck 41 box** (raw 32), **car 101** (raw 122), bus 32 (raw 35). Autofix không đổi lớp, nên thay đổi này nhiều khả năng đến từ 80 ảnh được thay bằng nhãn người: ranh giới car/truck đã dịch chuyển, đúng nhóm lớp mà `second_opinion` yếu nhất (mục 4b: điểm mù truck↔bus). Nếu ranh giới car/truck trong nhãn mới không khớp với cách gán của test thì AP truck giảm. *Kiểm:* liệt kê ảnh có box truck thay đổi giữa raw và clean (`03_fixes.csv`, `06_review_log.csv`), xem bằng `viz_labels.py` và đối chiếu với guideline gán lớp.
+4. **`raw` thật ra chỉ train 213 ảnh, `clean` vẫn còn lỗi.** Log Ultralytics: `raw` có `11 corrupt` (img_0010 và img_0136 hỏng; 9 ảnh có 1 dòng nhãn hỏng: id 93/7/4/−1, `nan`, thiếu cột) và `19 backgrounds` (gồm 6 ảnh chưa có file nhãn bị coi là "không có vật"), nên chỉ dùng **213/224 ảnh**, so với `clean` dùng đủ **202/202** (4 ảnh nền). Pipeline bắt đủ cả 11 ảnh này, và với 9 ảnh nhãn hỏng chỉ xoá đúng dòng lỗi thay vì bỏ cả ảnh. Khoảng cách dữ liệu thực tế chỉ là 213 so với 202, nhưng `clean` vẫn còn 38 ảnh có cảnh báo chưa duyệt (Hold). *Kiểm:* train thêm biến thể `oracle` (nhãn người) làm chặn trên.
+5. **Fine-tune làm mô hình kém đi.** Như trên, `best.pt` đều là epoch 1. *Kiểm:* train lại với `freeze` backbone hoặc learning rate nhỏ hơn và so ở epoch cuối, xem khi mô hình thật sự học từ dữ liệu thì chênh lệch raw/clean có lộ ra không.
+
+**Việc tiếp theo:** sửa thiết lập train để mô hình thật sự học từ dữ liệu (freeze backbone hoặc lr nhỏ, so ở epoch cuối); chạy 3–5 seed và bỏ 5 ảnh rò rỉ khỏi test để đo lại; train `oracle`; duyệt thêm ≥ 18 ảnh để `clean` đạt Release rồi train lại. Chỉ khi chênh lệch vượt rõ độ lệch giữa các seed mới kết luận được về tác dụng của pipeline lên mô hình.
 
 ## 6. Quyết định và ghi chú AI
 **(a) Quyết định cuối: Hold**, không phát hành `clean_v1` (chỉ dùng làm bản nháp thử nghiệm). Để thành **Release** cần đưa tỉ lệ ảnh còn cảnh báo chưa duyệt xuống dưới 10%, tức tối đa 20/202 ảnh: người duyệt thêm **ít nhất 18 trong 38 ảnh** còn cảnh báo (ngân sách khoảng 98 ảnh thay vì 80, hoặc thêm một lượt duyệt), ưu tiên theo `05_review_queue.csv` từ hạng 81. **Không** tăng `second_opinion.conf` lên 0,8 chỉ để qua cổng, vì như vậy bỏ sót khoảng 25% box thiếu.

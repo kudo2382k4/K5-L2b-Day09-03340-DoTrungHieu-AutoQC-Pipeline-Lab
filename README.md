@@ -2,7 +2,7 @@
   <img src="docs/assets/hero.png" alt="Day 09 Lab: pipeline kiểm nhãn tự động" width="100%">
 </p>
 
-# Day 09 Lab — Do Trung Hieu: 03340 - Do Trung Hieu
+# Day 09 Lab — Đỗ Trung Hiếu: 2A202603340 - Đỗ Trung Hiếu
 
 <p align="center">
   <img alt="cá nhân" src="https://img.shields.io/badge/lab-cá%20nhân-0b1f3a">
